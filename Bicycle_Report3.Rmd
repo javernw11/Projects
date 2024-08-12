@@ -1,0 +1,547 @@
+---
+title: "Bikes Sold Data Forecast"
+author: "Javern Wilson"
+date: "2024-08-12"
+output:
+  pdf_document:
+    df_print: kable
+  html_document: default
+geometry: margin=1in
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::knit_hooks$set(crop = function(before, options, envir) {})
+
+library(tidyverse)
+library(forecast)
+library(fpp3)
+library(gridExtra)
+library(kableExtra)
+library(lubridate)
+library(prophet)
+library(caret)
+library(Metrics)
+library(randomForest)
+```
+
+
+# About Dataset
+
+The Bikes Sold dataset represents time series with daily entries. The main variables are the bike prices and the number of bikes sold.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Import dataset
+bikes <- read_csv("Bikes sold data.csv")
+head(bikes)
+
+#Clean up the data
+bikes <- bikes %>% rename("bike_price" = `Bike Price`, "num_bikes_sold" = `Number of Bikes Sold`)
+bikes$bike_price <- gsub("\\$", "", bikes$bike_price) |> as.numeric()
+bikes$Date <- as.Date.character(gsub("/", "-",bikes$Date), '%m-%d-%Y')
+
+
+```
+
+## Summary of Bikes Sold Dataset
+```{r echo=FALSE, warning=FALSE}
+summary(bikes)
+```
+
+```{r include=FALSE}
+#Add a Sales column and represent numbers in billions
+bikes$Sales <- (bikes$bike_price * bikes$num_bikes_sold) / 1e9
+bikes$num_bikes_sold <- bikes$num_bikes_sold / 1e9
+
+```
+
+
+## Aggregate Dataset from Daily to Monthly
+
+For forecasting and analysis, the data was aggregated monthly due to its length. A `Total_Sales = (Avg_Bike_Price * Total_Bikes_Sold)` column was added just for visibility.
+
+```{r echo=FALSE, warning=FALSE}
+#Aggregate dataset to a monthly fashion
+monthly_data <- bikes %>%
+  mutate(YearMonth = floor_date(Date, "month")) %>%
+  group_by(YearMonth) %>%
+  summarize(
+    Avg_Bike_Price = mean(bike_price, na.rm = TRUE),
+    Total_Bikes_Sold = sum(num_bikes_sold, na.rm = TRUE)
+  )
+
+monthly_data$Total_Sales <- monthly_data$Avg_Bike_Price * monthly_data$Total_Bikes_Sold
+
+head(monthly_data, 5)
+tail(monthly_data, 5)
+
+```
+
+
+# Analysis/Observation
+
+## Illustration Time Series Graphs
+
+```{r include=FALSE}
+#Time series created for each variable
+bikes_sold_ts <- ts(monthly_data$Total_Bikes_Sold, frequency = 12, start = min(year(monthly_data$YearMonth)))
+bikes_price_ts <- ts(monthly_data$Avg_Bike_Price, frequency = 12, start = min(year(monthly_data$YearMonth)))
+bikes_sales_ts <- ts(monthly_data$Total_Sales, frequency = 12, start = min(year(monthly_data$YearMonth)))
+```
+
+```{r echo=FALSE, warning=FALSE}
+#Plot each Time series
+#autoplot(bikes_price_ts, main = "Bikes Prices: 1999-2024")
+#autoplot(bikes_sales_ts, main = "Bikes Sales Revenue: 1999-2024")
+autoplot(bikes_sold_ts, main = "Bikes Sold: 1999-2024") + geom_line(color = "blue", size = 0.75)
+
+```
+
+### Key Observations:
+
+* **Early Growth (Late 1990s - Early 2000s):** 
+  + The series begins with a period of rapid growth, reaching a peak around the early 2000s. This indicates a sharp increase in bike sales during this time.
+
+* **Fluctuations and Decline (2000s):** 
+  + After the peak, there is a significant decline, followed by several fluctuations, with smaller peaks and troughs.
+  + The overall trend during the mid-to-late 2000s is downward, possibly indicating decreasing sales with occasional short-lived increases.
+
+* **Stabilization and Further Decline (2010s):** 
+  + After 2010, the series shows a general stabilization with some volatility, but the overall trend is still downward, though less steep than in the previous decade.
+
+* **Recent Years:** 
+  + There is another notable decline, with sales dropping to levels comparable to those seen at the beginning series.
+  + Suggests that bike sales are continuing to decline, possibly due to market saturation, changing consumer preferences, or other external factors affecting demand.
+
+```{r echo=FALSE}
+# Reshape the data
+df_rs <- monthly_data %>% select(-Total_Bikes_Sold) %>% 
+  gather(key = "Variable", value = "Value", -YearMonth)  
+
+ggplot(df_rs, aes(x = YearMonth, y = Value, color = Variable)) +
+  geom_line(size = 0.5) +
+  labs(title = "Bike Price and Sales 1999-2024", y = "Bikes (Bn)", x = "Year") +
+  scale_color_manual(values = c("Avg_Bike_Price" = "red", "Total_Sales" = "darkgreen")) +
+  facet_grid(Variable ~ ., scales = "free_y") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+```
+
+### Key Observations:
+
+* **Low Activity (Late 1990s - 2010s):** 
+  + For the majority of the timeline both plots, from the late 1990s through the 2010s, bike sales remained relatively flat with minimal fluctuations. The sales figures during this period were consistently low, showing little to no significant growth.
+
+* **Sudden and Exponential Growth (Late 2010s - Early 2020s):**
+  + Starting around the late 2010s, there is a dramatic and exponential increase. This could be attributed to various factors such as: 
+    + More demand for new features in bike technology
+    + Shift in consumer behavior (e.g., the COVID-19 pandemic)
+    + Sharp rise in bike prices
+    + Shift towards higher-value products. 
+
+* **Sharp Decline:**
+  + After reaching the peak, there is a noticeable and steep decline in sales. However, even after this drop, the sales remain substantially higher than the earlier years of the time series.
+  + The sharp decline after the peak could indicate a market correction, a decrease in demand after a surge, or market saturation.
+
+
+## What story does the graphs tell?
+
+**Higher Number of Bikes Sold but Lower Revenue**
+
+* Lower-Priced Bikes: If the number of bikes sold is higher, but the revenue is low, it could suggest that the bikes being sold were of lower value or priced more afford-ably. During the early 2000s, there may have been high-volume sales of lower-cost bikes.
+
+* Market Saturation: A large number of bikes sold in earlier periods might reflect market saturation, where the demand was high, but the price point was kept low to maintain or increase sales volume.
+
+
+**Sudden Increase in Revenue with Fewer Units Sold**
+
+* Higher-Priced Bikes: The exponential increase in revenue in the later years, despite a potentially lower number of bikes sold, suggests a shift towards selling more expensive, premium bikes. This could be due to advancements in technology, electric bikes, or a focus on high-end models that command a higher price.
+
+* Pandemic Influence: The spike in revenue might also correspond with the COVID-19 pandemic, where demand for bikes surged, and consumers were willing to pay more, either due to increased interest in outdoor activities or supply chain disruptions that drove prices up.
+
+***
+
+**Going forward, we will focus on the `Total_Bikes_Sold` series which is used to help forecast bikes to be sold in the future months**
+
+
+## Seaonsality
+```{r echo=FALSE}
+ggseasonplot(bikes_sold_ts, main = "Seasonal Plot: Bikes Sold")
+```
+
+
+#### Peaks and Troughs by Month:  
+
+The seasonal peaks and troughs are relatively consistent across many years, indicating that bike sales follow a similar pattern annually. This recurring pattern is a hallmark of seasonality, where sales increase and decrease at predictable times of the year.
+
+**April and June**: There are noticeable peaks in bike sales around April and June across many years. This suggests that bike sales tend to increase during the spring and early summer months. The increase may be driven by factors such as warmer weather, outdoor activities, and perhaps holiday periods.
+
+**September and November**: Another set of peaks is observed around September and November, indicating a possible secondary increase in sales. This could be due to end-of-summer activities, back-to-school periods or clearance sales when bike sales might spike again.
+
+**December, January and February**: There is a drop in sales in these months across all years, which might reflect a seasonal decline during winter months.
+
+
+## Decomposition with STL (Seasonal and Trend decomposition using Loess)
+```{r echo=FALSE}
+autoplot(stl(bikes_sold_ts,t.window=15, s.window="periodic", robust=TRUE)) + 
+  labs(title = "STL Decomposition for No. of Bikes Sold")
+```
+
+To confirm the details aforementioned:
+
+* The trend component shows the overall direction of bike sales over time (downwards)
+
+* The seasonal component highlights the repetitive patterns or cycles within each year. Indicates consistent seasonal effects
+
+* As for the remainder component, it captures noise or irregular effects not explained by trend or seasonality
+
+
+# Modeling
+
+## Create Train and Test sets
+
+```{r echo=FALSE}
+# Split the data into training and testing sets
+train_size <- floor(0.8 * length(bikes_sold_ts))
+train <- window(bikes_sold_ts, end=c(min(year(monthly_data$YearMonth)), train_size))
+test <- window(bikes_sold_ts, start=c(min(year(monthly_data$YearMonth)), train_size + 1))
+
+# Function to calculate and print accuracy metrics
+calculate_accuracy <- function(forecasted_values, actual_values) {
+  mae <- mae(actual_values, forecasted_values)
+  rmse <- rmse(actual_values, forecasted_values)
+  return(list(MAE = mae, RMSE = rmse))
+}
+```
+
+#### Train
+```{r echo=FALSE}
+print(head(train, 10))
+```
+
+#### Test
+```{r echo=FALSE}
+print(head(test, 10))
+```
+
+
+## Build and Train Models
+
+#### Models Applied:
+
+* ARIMA
+* Seasonal ARIMA (SARIMA)
+* Exponential Smoothing (ETS)
+* Holt-Winters
+* Linear Regression
+* Random Forest
+
+```{r warning=FALSE, include=FALSE}
+
+# 1. ARIMA Model
+arima_model <- auto.arima(train)
+arima_forecast <- forecast(arima_model, h=length(test))
+arima_accuracy <- calculate_accuracy(arima_forecast$mean, test)
+
+# 2. Seasonal ARIMA (SARIMA) Model
+sarima_model <- auto.arima(train, seasonal=TRUE)
+sarima_forecast <- forecast(sarima_model, h=length(test))
+sarima_accuracy <- calculate_accuracy(sarima_forecast$mean, test)
+
+# 3. Exponential Smoothing (ETS) Model
+ets_model <- ets(train)
+ets_forecast <- forecast(ets_model, h=length(test))
+ets_accuracy <- calculate_accuracy(ets_forecast$mean, test)
+
+# 4. Holt-Winters Model
+hw_model <- HoltWinters(train)
+hw_forecast <- forecast(hw_model, h=length(test))
+hw_accuracy <- calculate_accuracy(hw_forecast$mean, test)
+
+# 5. Linear Regression Model
+# Prepare lagged features for Linear Regression
+train_lr <- data.frame(y = as.numeric(train), lag1 = stats::lag(train, -1), lag2 = stats::lag(train, -2))
+train_lr <- na.omit(train_lr)  # Remove NA values
+lr_model <- lm(y ~ lag1 + lag2, data=train_lr)
+
+# Prepare test data
+test_lr <- data.frame(lag1 = stats::lag(test, -1), lag2 = stats::lag(test, -2))
+test_lr <- na.omit(test_lr)
+lr_pred <- predict(lr_model, newdata=test_lr)
+lr_accuracy <- calculate_accuracy(lr_pred, as.numeric(test[-c(1:2)]))
+
+# 6. Random Forest Model
+# Prepare lagged features for Random Forest
+train_rf <- data.frame(y = as.numeric(train), lag1 = stats::lag(train, -1), lag2 = stats::lag(train, -2))
+train_rf <- na.omit(train_rf)  # Remove NA values
+rf_model <- randomForest(y ~ lag1 + lag2, data=train_rf)
+
+# Prepare test data
+test_rf <- data.frame(lag1 = stats::lag(test, -1), lag2 = stats::lag(test, -2))
+test_rf <- na.omit(test_rf)
+rf_pred <- predict(rf_model, newdata=test_rf)
+rf_accuracy <- calculate_accuracy(rf_pred, as.numeric(test[-c(1:2)]))
+
+```
+
+
+## Evaluate and Compare Models
+
+Below are the accuracy scores (MAE and RMSE) for the different models trained. These metrics indicate how well each model performed on unseen data after training.
+
+```{r echo=FALSE, warning=FALSE}
+# Compare the models based on MAE and RSME
+model_comparison <- data.frame(
+  Model = c("ARIMA", "ETS", "SARIMA", "Holt-Winters", "Random Forest", "Linear Regression"),
+  MAE = c(arima_accuracy$MAE, ets_accuracy$MAE, sarima_accuracy$MAE, hw_accuracy$MAE, rf_accuracy$MAE, lr_accuracy$MAE),
+  RMSE = c(arima_accuracy$RMSE, ets_accuracy$RMSE, sarima_accuracy$RMSE, hw_accuracy$RMSE, rf_accuracy$RMSE, lr_accuracy$RMSE))
+
+
+print("Model Comparison:")
+print(model_comparison)
+
+```
+
+
+### Interpretation:
+
+**ETS (Exponential Smoothing State Space Model)** achieved the lowest Mean Absolute Error (MAE) of 1.9896 and the lowest Root Mean Squared Error (RMSE) of 2.6412, indicating the best overall performance in terms of accuracy.
+
+**Holt-Winters** model came close, with an MAE of 2.0683 and an RMSE of 2.6544. It performed slightly worse than ETS but still showed strong results.
+
+Random Forest and Linear Regression were the least accurate among the models tested.
+
+
+```{r echo=FALSE, warning=FALSE}
+
+# Create a data frame with all the necessary information
+df <- data.frame(
+  Year = as.numeric(time(test)), 
+  Actual = as.numeric(test),
+  ARIMA = as.numeric(arima_forecast$mean),
+  SARIMA = as.numeric(sarima_forecast$mean),
+  ETS = as.numeric(ets_forecast$mean),
+  HW = as.numeric(hw_forecast$mean),
+  RF = as.numeric(rf_pred),
+  LR = as.numeric(lr_pred)
+)
+
+# Reshape the data
+df_long <- df %>%
+  gather(key = "Model", value = "Value", -Year)  
+
+# Plot using ggplot2
+ggplot(df_long, aes(x = Year, y = Value, color = Model)) +
+  geom_line(size = 0.5) +
+  labs(title = "Model Comparison", y = "Bikes Sold", x = "Year") +
+  scale_color_manual(values = c("Actual" = "black", "ARIMA" = "blue", "SARIMA" = "orange", "ETS" = "red", "HW" = "brown", "RF" = "purple", "LR" = "magenta")) +
+  facet_grid(Model ~.) +
+  theme_minimal() +
+  theme(legend.title = element_blank()) 
+
+```
+
+You may notice that the Random Forest (RF) and Linear Regression (LR) models have the highest Mean Absolute Error (MAE) and Root Mean Square Error (RMSE) but fits closest to the actual data.
+
+Here's why this might happen:
+
+**Overfitting**: Both models captures not only the true patterns but also the noise within the training data which lead to to higher error rates when applied to the test data.
+
+**Model Complexity**: Both models compared to ARIMA and ETS are complex. While this complexity allows them to capture more intricate patterns, it can also lead to higher errors because it may be sensitive to variations and noise in the data that other models might smooth over or ignore.
+
+**Variance in Data**: If the data has a lot of variability, models like ARIMA and ETS may smooth out these fluctuations, leading to lower MAE and RMSE but less detailed fitting. RF and LR, on the other hand, might capture these fluctuations, leading to a better visual fit but higher error metrics due to the variability it introduces.
+
+
+## Closer Look at Chosen Models
+
+
+```{r include=FALSE}
+
+# Function to convert forecast object to a data frame 
+forecast_to_df <- function(model_forecast) {
+  # Extract relevant data from the forecast object
+  fc_df <- data.frame(
+    Date = time(model_forecast$mean),
+    Forecast = as.numeric(model_forecast$mean),
+    Lower80 = model_forecast$lower[,1],
+    Upper80 = model_forecast$upper[,1],
+    Lower95 = model_forecast$lower[,2],
+    Upper95 = model_forecast$upper[,2]
+  )
+  return(fc_df)
+}
+```
+
+### ETS - Exponential Smoothing (ETS) Model
+
+Residuals from ETS (M,A,M) Model
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+checkresiduals(ets_model)
+```
+
+Residuals from ETS (M,A,M) Model
+
+* The residuals fluctuate around zero, with some variability especially around 2000–2005.
+
+* The ACF plot shows very little auto-correlation, with most of the auto-correlations staying within the significance bounds (blue dashed lines). This indicates that the residuals are fairly uncorrelated, which is a good sign, but there are still some small auto-correlations at certain lags.
+
+* The histogram of the residuals is approximately normal but slightly skewed to the right. The residuals are mostly centered around zero, but there are some deviations from normality, which may indicate some non-randomness in the residuals.
+
+### ETS on the Test set
+
+```{r echo=FALSE, warning=FALSE}
+#ets_forecast object
+forecast_df <- forecast_to_df(ets_forecast)
+
+# Convert test data to a data frame
+test_df <- data.frame(
+ Date = time(test),
+ Actual = as.numeric(test)
+)
+# Plot graph
+
+ggplot() +
+ geom_line(data=test_df, aes(x=Date, y=Actual, color="Actual"), size=1) +
+ geom_line(data=forecast_df, aes(x=Date, y=Forecast, color="Forecast"), size=1) +
+ geom_ribbon(data=forecast_df, aes(x=Date, ymin=Lower95, ymax=Upper95, fill="95% Confidence Interval"), alpha=0.2) +
+ geom_ribbon(data=forecast_df, aes(x=Date, ymin=Lower80, ymax=Upper80, fill="80% Confidence Interval"), alpha=0.3) +
+ scale_color_manual(name="Legend", values = c("Actual" = "red", "Forecast" = "blue")) + 
+ scale_fill_manual(name="Confidence Intervals", values = c("95% Confidence Interval" = "blue", "80% Confidence Interval" = "blue")) +
+ labs(title="ETS Model Forecast vs Actual",
+      x="Year",
+      y="Bikes Sold (bn)") +
+ theme_minimal() +
+ theme(plot.title = element_text(hjust = 0.5)) +
+ scale_x_continuous(breaks = scales::pretty_breaks(n=10))
+
+```
+
+### Holt-Winters Model
+
+Residuals from Holt-Winters Model
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+checkresiduals(hw_model)
+```
+
+* The residuals also fluctuate around zero but exhibit a more pronounced pattern compared to the ETS model, especially around the early 2000s and around 2010. This suggests that the Holt-Winters model might not fully capture all the dynamics of the data.
+
+* The ACF plot shows significant auto-correlations at certain lags. This indicates that the residuals are not completely random and that the Holt-Winters model might be missing some periodic components or trends in the data.
+
+
+* The histogram is roughly normal, but there is a slight skew to the right and a few outliers. The distribution is more spread out compared to the ETS model, suggesting that the residuals have larger variability.
+
+
+### Holt-Winters on the test set
+
+```{r echo=FALSE, warning=FALSE}
+#hw_forecast object
+forecast_df <- forecast_to_df(hw_forecast)
+
+# Convert test data to a data frame
+test_df <- data.frame(
+ Date = time(test),
+ Actual = as.numeric(test)
+)
+# Plot graph
+
+ggplot() +
+ geom_line(data=test_df, aes(x=Date, y=Actual, color="Actual"), size=1) +
+ geom_line(data=forecast_df, aes(x=Date, y=Forecast, color="Forecast"), size=1) +
+ geom_ribbon(data=forecast_df, aes(x=Date, ymin=Lower95, ymax=Upper95, fill="95% Confidence Interval"), alpha=0.2) +
+ geom_ribbon(data=forecast_df, aes(x=Date, ymin=Lower80, ymax=Upper80, fill="80% Confidence Interval"), alpha=0.3) +
+ scale_color_manual(name="Legend", values = c("Actual" = "red", "Forecast" = "blue")) + 
+ scale_fill_manual(name="Confidence Intervals", values = c("95% Confidence Interval" = "blue", "80% Confidence Interval" = "blue")) +
+ labs(title="Holt-Winters Model Forecast vs Actual",
+      x="Year",
+      y="Bikes Sold (bn)") +
+ theme_minimal() +
+ theme(plot.title = element_text(hjust = 0.5)) +
+ scale_x_continuous(breaks = scales::pretty_breaks(n=10))
+
+```
+
+#### Overall
+
+* The ETS model appears to perform better overall, as indicated by less autocorrelation in the residuals, a tighter distribution around zero, and fewer pronounced patterns in the time series plot.
+
+* The Holt-Winters model shows more significant residual patterns and auto-correlations, suggesting it may not be capturing all the important components of the data. Nonetheless, this model performed better than the others (ARIMA, Linear Regression and  Random Forest).
+
+
+
+# Forecasting 
+
+#### Forecasting for the next 2 years
+
+## ETS - Exponential Smoothing (ETS) Model
+
+```{r echo=FALSE, warning=FALSE}
+#Apply model to entire time series data
+ets_model <- ets(bikes_sold_ts)
+
+#Forecast Horizon: 24 months
+ets_forecast2 <- forecast(ets_model, h=24)
+
+forecast_df <- forecast_to_df(ets_forecast2)
+
+# Convert actual data to a data frame for plotting
+actual_df <- data.frame(
+ Date = time(bikes_sold_ts),
+ Actual = as.numeric(bikes_sold_ts)
+)
+# Plot the forecast
+ggplot() +
+ geom_line(data=actual_df, aes(x=Date, y=Actual, color="Actual"), size=0.5) +
+ geom_line(data=forecast_df, aes(x=Date, y=Forecast, color="Forecast"), size=1) +
+ geom_ribbon(data=forecast_df, aes(x=Date, ymin=Lower95, ymax=Upper95, fill="95% Confidence Interval"), alpha=0.2) +
+ geom_ribbon(data=forecast_df, aes(x=Date, ymin=Lower80, ymax=Upper80, fill="80% Confidence Interval"), alpha=0.3) +
+ scale_color_manual(values=c("Actual"="black", "Forecast"="blue")) +
+ scale_fill_manual(values=c("95% Confidence Interval"="blue", "80% Confidence Interval"="blue")) +
+ labs(title="ETS Model Forecast for the Next 2 Years",
+      x="Year",
+      y="Bikes Sold",
+      color="Legend",
+      fill="Confidence Interval") +
+ theme_minimal() +
+ theme(plot.title = element_text(hjust = 0.5)) +
+ scale_x_continuous(breaks = scales::pretty_breaks(n=10))
+```
+
+## Holt-Winters Model
+
+```{r echo=FALSE, warning=FALSE}
+#Apply model to entire time series data
+hw_model <- HoltWinters(bikes_sold_ts)
+
+#Forecast Horizon: 24 months
+hw_forecast2 <- forecast(hw_model, h=24)
+
+forecast_df <- forecast_to_df(hw_forecast2)
+
+# Convert actual data to a data frame for plotting
+actual_df <- data.frame(
+ Date = time(bikes_sold_ts),
+ Actual = as.numeric(bikes_sold_ts)
+)
+# Plot the forecast
+ggplot() +
+ geom_line(data=actual_df, aes(x=Date, y=Actual, color="Actual"), size=0.5) +
+ geom_line(data=forecast_df, aes(x=Date, y=Forecast, color="Forecast"), size=1) +
+ geom_ribbon(data=forecast_df, aes(x=Date, ymin=Lower95, ymax=Upper95, fill="95% Confidence Interval"), alpha=0.2) +
+ geom_ribbon(data=forecast_df, aes(x=Date, ymin=Lower80, ymax=Upper80, fill="80% Confidence Interval"), alpha=0.3) +
+ scale_color_manual(values=c("Actual"="black", "Forecast"="blue")) +
+ scale_fill_manual(values=c("95% Confidence Interval"="blue", "80% Confidence Interval"="blue")) +
+ labs(title="Holt-Winters Model Forecast for the Next 2 Years",
+      x="Year",
+      y="Bikes Sold",
+      color="Legend",
+      fill="Confidence Interval") +
+ theme_minimal() +
+ theme(plot.title = element_text(hjust = 0.5)) +
+ scale_x_continuous(breaks = scales::pretty_breaks(n=10))
+```
+
+Both forecasts predict a continued decline in bike sales over the next two years.
