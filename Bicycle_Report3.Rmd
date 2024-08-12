@@ -31,6 +31,8 @@ library(randomForest)
 
 The Bikes Sold dataset represents time series with daily entries. The main variables are the bike prices and the number of bikes sold.
 
+[Link to Code](https://github.com/javernw11/Projects/blob/main/Bicycle_Report3.Rmd) 
+
 ```{r echo=FALSE, message=FALSE, warning=FALSE}
 # Import dataset
 bikes <- read_csv("Bikes sold data.csv")
